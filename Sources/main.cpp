@@ -3,6 +3,7 @@
 #include <CTRPluginFramework.hpp>
 
 #include <cstdio>
+#include <cstdlib>
 #include <string>
 #include <vector>
 
@@ -75,9 +76,12 @@ exit:
 
     // ---- Guide reader (M2) ----------------------------------------------
 
-    // Fixed guide path for M2. In CTRPF paths a leading '/' is the SD card root
-    // (FSPath::SdmcFixPath checks for it); no leading '/' = plugin working dir.
-    static const char *     GuidePath = "/guides/3ds/default.txt";
+    // Guide paths, set per game from the low word of the title ID (M3):
+    // /guides/3ds/<TIDLOW>.txt = the guide, /guides/3ds/<TIDLOW>.pos = saved line.
+    // In CTRPF paths a leading '/' is the SD card root (FSPath::SdmcFixPath checks
+    // for it); no leading '/' = plugin working dir.
+    static std::string      GuidePath;
+    static std::string      PosPath;
 
     // Screen sizes in pixels
     static const u32        TopWidth = 400;
@@ -176,6 +180,10 @@ exit:
 
         const std::string titleId = TitleIdString();
 
+        // Guide file named after the title ID low word, e.g. 000EC400 = ALBW EUR
+        GuidePath = "/guides/3ds/" + titleId.substr(8) + ".txt";
+        PosPath = "/guides/3ds/" + titleId.substr(8) + ".pos";
+
         // Plugin font is monospace: measure one glyph (fallback 6 px) to get the columns
         u32     charWidth = (u32)OSD::GetTextWidth(false, "W");
         if (charWidth == 0)
@@ -228,6 +236,23 @@ exit:
 
         const u32   lineCount = (u32)index.size();
         u32         top = 0;            // first visible line
+
+        // Saved reading position: a decimal line number in the .pos file, clamped
+        u32         savedTop = 0;
+        if (lineCount > 0 && File::Exists(PosPath) == 1)
+        {
+            File    pf;
+            char    buf[16] = {0};
+            if (File::Open(pf, PosPath, File::READ) == File::SUCCESS)
+            {
+                u64 n = pf.GetSize();
+                if (n > 0 && n < sizeof(buf) && pf.Read(buf, (u32)n) == File::SUCCESS)
+                    savedTop = (u32)strtoul(buf, nullptr, 10);
+                pf.Close();
+            }
+            top = Pager::ClampTop(savedTop, lineCount, visible);
+            savedTop = top;
+        }
         bool        reload = true;      // page text must be re-read from the file
         int         redraw = 2;         // frames left to draw (2 = both buffers of the double buffer)
         u32         heldFrames = 0;     // how long Up/Down has been held, for repeat
@@ -299,6 +324,20 @@ exit:
         if (file.IsOpen())
             file.Close();
 
+        // Remember the line we stopped at. Written only when it changed, so a
+        // plain open/close costs no SD write.
+        if (hasGuide && lineCount > 0 && top != savedTop)
+        {
+            File    pf;
+            if (File::Open(pf, PosPath, File::RWC | File::TRUNCATE) == File::SUCCESS)
+            {
+                char    buf[16];
+                int     len = snprintf(buf, sizeof(buf), "%lu", (unsigned long)top);
+                pf.Write(buf, (u32)len);
+                pf.Close();
+            }
+        }
+
         // Don't let the closing B press (or anything still held) leak into the game
         WaitButtonsReleased();
 
@@ -331,6 +370,7 @@ exit:
     void    InitMenu(PluginMenu &menu)
     {
         // One entry: no per-frame game function (nullptr), only a menu callback
+        // ponytail: unreachable (ForceOpen goes through the OnOpening gate too); kept so the menu has one entry
         menu += new MenuEntry("Guide", nullptr, GuideMenu, "Open the text guide from the SD card.");
     }
 
