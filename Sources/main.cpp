@@ -2,7 +2,11 @@
 #include "csvc.h"
 #include <CTRPluginFramework.hpp>
 
+#include <cstdio>
+#include <string>
 #include <vector>
+
+#include "pager.hpp"
 
 namespace CTRPluginFramework
 {
@@ -69,17 +73,265 @@ exit:
         ToggleTouchscreenForceOn();
     }
 
-    // Menu callback for the "Guide" entry: runs when the entry is selected in the CTRPF menu
+    // ---- Guide reader (M2) ----------------------------------------------
+
+    // Fixed guide path for M2. In CTRPF paths a leading '/' is the SD card root
+    // (FSPath::SdmcFixPath checks for it); no leading '/' = plugin working dir.
+    static const char *     GuidePath = "/guides/3ds/default.txt";
+
+    // Screen sizes in pixels
+    static const u32        TopWidth = 400;
+    static const u32        BottomWidth = 320;
+    static const u32        ScreenHeight = 240;
+
+    // Plugin font: Screen::Draw returns posY + 10, so one text line is 10 px high
+    static const u32        LineHeight = 10;
+    // Left margin of the guide text on the top screen
+    static const u32        Margin = 2;
+
+    // Hold-to-repeat for Up/Down: first repeat after 15 frames, then every 3 frames
+    static const u32        RepeatDelay = 15;
+    static const u32        RepeatRate = 3;
+
+    // Buttons that must be released before the game resumes, so the B (or L/R/Select)
+    // press never reaches the game. Circle pad and touch are left out so a drifting
+    // stick can't keep us waiting.
+    static const u32        ButtonMask = Key::A | Key::B | Key::X | Key::Y | Key::L | Key::R
+                                       | Key::Start | Key::Select | Key::DPadUp | Key::DPadDown
+                                       | Key::DPadLeft | Key::DPadRight;
+
+    // Running title ID as 16 hex digits (for mapping games to guides later)
+    static std::string  TitleIdString(void)
+    {
+        u64     tid = Process::GetTitleID();
+        char    buf[17];
+
+        snprintf(buf, sizeof(buf), "%08lX%08lX", (unsigned long)(tid >> 32), (unsigned long)(tid & 0xFFFFFFFF));
+        return buf;
+    }
+
+    // Wait (max ~2 s) until every button is up, keeping the reader on screen
+    static void     WaitButtonsReleased(void)
+    {
+        for (int i = 0; i < 120; ++i)
+        {
+            Controller::Update();
+            if ((Controller::GetKeysDown() & ButtonMask) == 0)
+                break;
+            svcSleepThread(16666667LL); // ~1 frame
+        }
+    }
+
+    // Top screen: black background, then one plugin-font line per 10 px row.
+    // When there is no guide, `message` is shown instead of the lines.
+    static void     DrawTop(const std::vector<std::string> &lines, const std::string &message)
+    {
+        const Screen &top = OSD::GetTopScreen();
+
+        top.DrawRect(0, 0, TopWidth, ScreenHeight, Color::Black, true);
+
+        if (!message.empty())
+        {
+            top.Draw(message, Margin, 0, Color::White, Color::Black);
+            return;
+        }
+
+        u32 y = 0;
+        for (const std::string &line : lines)
+            y = top.Draw(line, Margin, y, Color::White, Color::Black);
+    }
+
+    // Bottom screen: status bar with file name, position, title ID and key legend
+    static void     DrawBottom(const std::string &position, const std::string &titleId, bool hasGuide)
+    {
+        const Screen &bottom = OSD::GetBottomScreen();
+
+        bottom.DrawRect(0, 0, BottomWidth, ScreenHeight, Color::Black, true);
+
+        u32 y = 4;
+        y = bottom.Draw("3DS Guides", 4, y, Color::Orange, Color::Black);
+        y += 6;
+        y = bottom.Draw(std::string("File: ") + GuidePath, 4, y, Color::White, Color::Black);
+        y = bottom.Draw(position, 4, y, Color::White, Color::Black);
+        y = bottom.Draw("Title ID: " + titleId, 4, y, Color::White, Color::Black);
+
+        // Key legend pinned to the bottom edge, above a thin separator
+        bottom.DrawRect(0, ScreenHeight - 18, BottomWidth, 1, Color::Gray, true);
+        bottom.Draw(hasGuide ? "L/R page  Up/Dn line  B close" : "B close", 4, ScreenHeight - 14,
+                    Color::Yellow, Color::Black);
+    }
+
+    // The reader: pauses the game (unless the menu already did), shows the guide
+    // until B, then resumes the game. Runs on the plugin thread, like MessageBox.
+    static void     RunGuideReader(void)
+    {
+        // Pause the game ourselves on the hotkey path; the menu path is already paused.
+        // Process::Pause() blocks until the game is frozen and hands us the screens.
+        bool    pausedHere = false;
+        if (!Process::IsPaused())
+        {
+            Process::Pause();
+            pausedHere = true;
+        }
+
+        const std::string titleId = TitleIdString();
+
+        // Plugin font is monospace: measure one glyph (fallback 6 px) to get the columns
+        u32     charWidth = (u32)OSD::GetTextWidth(false, "W");
+        if (charWidth == 0)
+            charWidth = 6;
+        const u32   maxCols = (TopWidth - Margin) / charWidth;     // ~66
+        const u32   visible = ScreenHeight / LineHeight;           // 24
+
+        // Show something right away: indexing a big guide takes a moment on SD
+        {
+            const Screen &top = OSD::GetTopScreen();
+            top.DrawRect(0, 0, TopWidth, ScreenHeight, Color::Black, true);
+            top.Draw("Loading guide...", Margin, 0, Color::White, Color::Black);
+            OSD::SwapBuffers();
+        }
+
+        // Open the guide and build the line-offset index once. The file stays open
+        // for the whole session; pages are read from it on demand.
+        File                file;
+        std::vector<u32>    index;
+        u32                 fileSize = 0;
+        bool                hasGuide = false;
+        std::string         message;
+
+        if (File::Exists(GuidePath) == 1 && File::Open(file, GuidePath, File::READ) == File::SUCCESS)
+        {
+            u64 size = file.GetSize();
+            fileSize = (size > 0xFFFFFFFFULL) ? 0xFFFFFFFF : (u32)size;
+            hasGuide = true;
+        }
+        else
+            message = std::string("No guide at ") + GuidePath;
+
+        // Byte reader for the pager: seek + read exactly `length` bytes (File::Read
+        // returns 0 on success, not a byte count; the pager never reads past EOF)
+        auto reader = [&file](u32 offset, char *buffer, u32 length) -> u32
+        {
+            if (file.Seek(offset, File::SET) != File::SUCCESS)
+                return 0;
+            if (file.Read(buffer, length) != File::SUCCESS)
+                return 0;
+            return length;
+        };
+
+        if (hasGuide)
+        {
+            Pager::BuildLineIndex(index, fileSize, reader);
+            if (index.empty())
+                message = std::string("Guide is empty: ") + GuidePath;
+        }
+
+        const u32   lineCount = (u32)index.size();
+        u32         top = 0;            // first visible line
+        bool        reload = true;      // page text must be re-read from the file
+        int         redraw = 2;         // frames left to draw (2 = both buffers of the double buffer)
+        u32         heldFrames = 0;     // how long Up/Down has been held, for repeat
+        std::vector<std::string>    lines;
+
+        while (true)
+        {
+            Controller::Update();
+
+            // B closes the reader
+            if (Controller::IsKeyPressed(Key::B))
+                break;
+
+            if (lineCount > 0)
+            {
+                int64_t wanted = top;
+
+                // Up/Down: one line, on the first frame then with hold-to-repeat
+                u32 keys = Controller::GetKeysDown();
+                int dir = (keys & Key::DPadDown) ? 1 : ((keys & Key::DPadUp) ? -1 : 0);
+                if (dir == 0)
+                    heldFrames = 0;
+                else
+                {
+                    if (heldFrames == 0
+                        || (heldFrames >= RepeatDelay && (heldFrames - RepeatDelay) % RepeatRate == 0))
+                        wanted += dir;
+                    ++heldFrames;
+                }
+
+                // L/R: one screen of lines back/forward
+                if (Controller::IsKeyPressed(Key::L))
+                    wanted -= visible;
+                if (Controller::IsKeyPressed(Key::R))
+                    wanted += visible;
+
+                // Keep the first visible line inside the file (last page stays full)
+                u32 newTop = Pager::ClampTop(wanted, lineCount, visible);
+                if (newTop != top)
+                {
+                    top = newTop;
+                    reload = true;
+                }
+            }
+
+            // Re-read only the visible lines from the SD card when the position changed
+            if (reload)
+            {
+                if (lineCount > 0)
+                    Pager::GetLines(lines, index, fileSize, top, visible, maxCols, reader);
+                reload = false;
+                redraw = 2;
+            }
+
+            // Draw only after a change (twice, once per buffer), then present the frame.
+            // SwapBuffers waits for the GPU swap, which paces this loop at the screen rate.
+            if (redraw > 0)
+            {
+                char position[48];
+                snprintf(position, sizeof(position), "Line %lu / %lu",
+                         (unsigned long)(lineCount ? top + 1 : 0), (unsigned long)lineCount);
+                DrawTop(lines, message);
+                DrawBottom(position, titleId, lineCount > 0);
+                --redraw;
+            }
+            OSD::SwapBuffers();
+        }
+
+        if (file.IsOpen())
+            file.Close();
+
+        // Don't let the closing B press (or anything still held) leak into the game
+        WaitButtonsReleased();
+
+        // Resume the game exactly where it was (only if we were the one pausing it)
+        if (pausedHere)
+            Process::Play();
+    }
+
+    // Menu hotkey gate. CTRPF calls this when the menu hotkey (Select) fires, BEFORE
+    // it pauses the game; returning false cancels the opening (no pause, no menu).
+    static bool     OnMenuOpening(void)
+    {
+        const u32 combo = Key::L | Key::R;
+
+        // Plain Select: open nothing, the game keeps its Select press
+        if ((Controller::GetKeysDown() & combo) != combo)
+            return false;
+
+        // L+R+Select: show the guide right here and never show the menu list
+        RunGuideReader();
+        return false;
+    }
+
+    // Menu callback for the "Guide" entry: same reader, second way in
     static void    GuideMenu(MenuEntry *entry)
     {
-        // Show a simple OK dialog to prove the plugin loaded and the menu works
-        MessageBox("3DS Guides", "Hello from 3DS Guides. M1 OK.")();
+        RunGuideReader();
     }
 
     void    InitMenu(PluginMenu &menu)
     {
         // One entry: no per-frame game function (nullptr), only a menu callback
-        menu += new MenuEntry("Guide", nullptr, GuideMenu, "M1 test entry.");
+        menu += new MenuEntry("Guide", nullptr, GuideMenu, "Open the text guide from the SD card.");
     }
 
     int     main(void)
@@ -89,6 +341,9 @@ exit:
 
         // Synnchronize the menu with frame event
         menu->SynchronizeWithFrame(true);
+
+        // Only L+R+Select opens anything (the guide reader); plain Select stays with the game
+        menu->OnOpening = OnMenuOpening;
 
         // Init our menu entries & folders
         InitMenu(*menu);
