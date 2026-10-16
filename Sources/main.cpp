@@ -57,6 +57,8 @@ exit:
     // Useful to do code edits safely
     void    PatchProcess(FwkSettings &settings)
     {
+        // B at the menu root closes the menu (default is Select or the touch X only)
+        settings.CloseMenuWithB = true;
         ToggleTouchscreenForceOn();
     }
 
@@ -67,26 +69,23 @@ exit:
         ToggleTouchscreenForceOn();
     }
 
+    // Menu callback for the "Guide" entry: runs when the entry is selected in the CTRPF menu
+    static void    GuideMenu(MenuEntry *entry)
+    {
+        // Show a simple OK dialog to prove the plugin loaded and the menu works
+        MessageBox("3DS Guides", "Hello from 3DS Guides. M1 OK.")();
+    }
+
     void    InitMenu(PluginMenu &menu)
     {
-        // Create your entries here, or elsewhere
-        // You can create your entries whenever/wherever you feel like it
-        
-        // Example entry
-        /*menu += new MenuEntry("Test", nullptr, [](MenuEntry *entry)
-        {
-            std::string body("What's the answer ?\n");
-
-            body += std::to_string(42);
-
-            MessageBox("UA", body)();
-        });*/
+        // One entry: no per-frame game function (nullptr), only a menu callback
+        menu += new MenuEntry("Guide", nullptr, GuideMenu, "M1 test entry.");
     }
 
     int     main(void)
     {
-        PluginMenu *menu = new PluginMenu("Action Replay", 0, 8, 0,
-                                            "A blank template plugin.\nGives you access to the ActionReplay and others tools.");
+        PluginMenu *menu = new PluginMenu("3DS Guides", 0, 1, 0,
+                                            "In-game guides for 3DS games.");
 
         // Synnchronize the menu with frame event
         menu->SynchronizeWithFrame(true);

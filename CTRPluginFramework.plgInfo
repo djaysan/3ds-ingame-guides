@@ -1,26 +1,18 @@
-Author: Nanquitas
+Author: RetroModLab
 
 Version: # Plugin version
     Major: 0
-    Minor: 7
-    Revision: 2
+    Minor: 1
+    Revision: 0
 
 Targets: # Low TitleId of games which are compatibles with this plugin (0 for all)
 
-Title: CTRPF - Blank Template
+Title: 3DS Guides
 
-Summary: A CTRPF Plugin, with a lot of tools
+Summary: In-game guides for 3DS games
 
 Description: |
-  This plugin gives you access to a set of tools to edit your games
-
-  Features:
-    - Memory searcher
-    - Hex Editor
-    - Code creator
-    - Code import from file
-    - Action Replay engine with extra capabilities
-    - Super fast screenshot engine
+  M1 test build. Opens a "3DS Guides" menu with one "Guide" entry.
 
 Compatibility: Any
 
