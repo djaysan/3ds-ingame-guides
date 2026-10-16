@@ -11,67 +11,18 @@
 
 namespace CTRPluginFramework
 {
-    // This patch the NFC disabling the touchscreen when scanning an amiibo, which prevents ctrpf to be used
-    static void    ToggleTouchscreenForceOn(void)
-    {
-        static u32 original = 0;
-        static u32 *patchAddress = nullptr;
-
-        if (patchAddress && original)
-        {
-            *patchAddress = original;
-            return;
-        }
-
-        static const std::vector<u32> pattern =
-        {
-            0xE59F10C0, 0xE5840004, 0xE5841000, 0xE5DD0000,
-            0xE5C40008, 0xE28DD03C, 0xE8BD80F0, 0xE5D51001,
-            0xE1D400D4, 0xE3510003, 0x159F0034, 0x1A000003
-        };
-
-        Result  res;
-        Handle  processHandle;
-        s64     textTotalSize = 0;
-        s64     startAddress = 0;
-        u32 *   found;
-
-        if (R_FAILED(svcOpenProcess(&processHandle, 16)))
-            return;
-
-        svcGetProcessInfo(&textTotalSize, processHandle, 0x10002);
-        svcGetProcessInfo(&startAddress, processHandle, 0x10005);
-        if(R_FAILED(svcMapProcessMemoryEx(CUR_PROCESS_HANDLE, 0x14000000, processHandle, (u32)startAddress, textTotalSize)))
-            goto exit;
-
-        found = (u32 *)Utils::Search<u32>(0x14000000, (u32)textTotalSize, pattern);
-
-        if (found != nullptr)
-        {
-            original = found[13];
-            patchAddress = (u32 *)PA_FROM_VA((found + 13));
-            found[13] = 0xE1A00000;
-        }
-
-        svcUnmapProcessMemoryEx(CUR_PROCESS_HANDLE, 0x14000000, textTotalSize);
-exit:
-        svcCloseHandle(processHandle);
-    }
-
     // This function is called before main and before the game starts
     // Useful to do code edits safely
     void    PatchProcess(FwkSettings &settings)
     {
         // B at the menu root closes the menu (default is Select or the touch X only)
         settings.CloseMenuWithB = true;
-        ToggleTouchscreenForceOn();
     }
 
     // This function is called when the process exits
     // Useful to save settings, undo patchs or clean up things
     void    OnProcessExit(void)
     {
-        ToggleTouchscreenForceOn();
     }
 
     // ---- Guide reader (M2) ----------------------------------------------
@@ -80,8 +31,9 @@ exit:
     // /guides/3ds/<TIDLOW>.txt = the guide, /guides/3ds/<TIDLOW>.pos = saved line.
     // In CTRPF paths a leading '/' is the SD card root (FSPath::SdmcFixPath checks
     // for it); no leading '/' = plugin working dir.
-    static std::string      GuidePath;
-    static std::string      PosPath;
+    // Plain char arrays, not std::string: nothing of ours runs a destructor at exit.
+    static char             GuidePath[32];
+    static char             PosPath[32];
 
     // Screen sizes in pixels
     static const u32        TopWidth = 400;
@@ -181,8 +133,8 @@ exit:
         const std::string titleId = TitleIdString();
 
         // Guide file named after the title ID low word, e.g. 000EC400 = ALBW EUR
-        GuidePath = "/guides/3ds/" + titleId.substr(8) + ".txt";
-        PosPath = "/guides/3ds/" + titleId.substr(8) + ".pos";
+        snprintf(GuidePath, sizeof(GuidePath), "/guides/3ds/%s.txt", titleId.c_str() + 8);
+        snprintf(PosPath, sizeof(PosPath), "/guides/3ds/%s.pos", titleId.c_str() + 8);
 
         // Plugin font is monospace: measure one glyph (fallback 6 px) to get the columns
         u32     charWidth = (u32)OSD::GetTextWidth(false, "W");
@@ -391,7 +343,10 @@ exit:
         // Launch menu and mainloop
         menu->Run();
 
-        delete menu;
+        // ponytail: no `delete menu` here. Run() only returns when the game process is
+        // exiting, and in libctrpf 0.8.0 PluginMenu's destructor double-frees its items
+        // (MenuItem::~MenuItem -> free() data abort, Luma dumps 2026-10-16). The OS
+        // reclaims the plugin memory anyway.
 
         // Exit plugin
         return (0);
