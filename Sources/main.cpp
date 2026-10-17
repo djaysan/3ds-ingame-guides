@@ -17,6 +17,10 @@ namespace CTRPluginFramework
     {
         // B at the menu root closes the menu (default is Select or the touch X only)
         settings.CloseMenuWithB = true;
+        // Memory: the plugin block is carved out of the GAME's application memory on
+        // old 3DS. 5 MiB is the floor for CTRPF 0.8.0: a 2 MiB build gave
+        // "fatal plugin error" at boot (2026-10-16). Bowser's Inside Story DX still
+        // crashes at boot with a plugin loaded (memory-tight game) = known limit.
     }
 
     // This function is called when the process exits

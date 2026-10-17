@@ -104,6 +104,21 @@ namespace Pager
     {
         while (!text.empty() && (text[text.size() - 1] == '\n' || text[text.size() - 1] == '\r'))
             text.erase(text.size() - 1);
+        // Expand tabs to the next 8-column stop: the plugin font has no tab glyph and
+        // about a quarter of the GameFAQs guides keep tabs on short lines
+        if (text.find('\t') != std::string::npos)
+        {
+            std::string expanded;
+            expanded.reserve(text.size() + 16);
+            for (char c : text)
+            {
+                if (c == '\t')
+                    expanded.append(8 - (expanded.size() % 8), ' ');
+                else
+                    expanded.push_back(c);
+            }
+            text.swap(expanded);
+        }
         if (text.size() > maxBytes)
             text.resize(maxBytes);
     }

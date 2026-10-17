@@ -149,6 +149,9 @@ int main()
         assert(out.size() == 24 && f.calls == 1);
     }
 
+    // Tabs expand to 8-column stops before truncation (plugin font has no tab glyph)
+    { std::string t = "a\tb\t\tc"; Pager::TrimLine(t, 64); assert(t == "a       b               c"); }
+    { std::string t = "\tx\r\n"; Pager::TrimLine(t, 4); assert(t == "    "); }
     std::printf("pager_test: all checks passed\n");
     return 0;
 }
